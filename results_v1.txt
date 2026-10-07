@@ -1,0 +1,23 @@
+Best epoch (chosen on validation): 22
+Test windows: 6053
+Test accuracy:          0.907
+Test balanced accuracy: 0.941
+Test macro-F1:          0.823
+Accuracy on dataset (unseen people): 0.905  (5933 windows)
+Accuracy on own recordings: 0.983  (120 windows)
+
+              precision    recall  f1-score   support
+
+      boxing       0.99      0.99      0.99      1487
+    clapping       0.83      0.91      0.87      1410
+       lying       1.00      1.00      1.00        33
+     running       0.82      0.92      0.86       363
+     sitting       0.94      1.00      0.97        29
+   squatting       0.26      0.96      0.41        28
+    standing       0.33      0.97      0.49        30
+     walking       0.97      0.89      0.93       916
+      waving       0.97      0.83      0.90      1757
+
+    accuracy                           0.91      6053
+   macro avg       0.79      0.94      0.82      6053
+weighted avg       0.93      0.91      0.91      6053

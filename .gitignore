@@ -1,0 +1,28 @@
+# Python environment and caches
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Datasets: licensed for non-commercial use only, never re-published (re-download with download_datasets.py)
+videos/
+urfall/
+downloads/
+*.part
+urfall_poses.npz
+
+# Extracted pose windows + own webcam recordings (personal data)
+data/
+
+# Live session logs
+logs/
+
+# Intermediate models (har_model.pt = final model, kept so the live app runs after cloning)
+har_model_v*.pt
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
