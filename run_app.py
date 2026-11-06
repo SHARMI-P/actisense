@@ -1,7 +1,8 @@
-"""Real-time recognition + analysis: activity label, squat rep counter, fall alert, CSV session log.
+"""Real-time recognition + analysis: activity label, held posture, squat rep counter, fall alert, CSV log.
 
 python run_app.py                 (webcam)
 python run_app.py --source x.mp4  (video file)
+If pose_model.pt is present, a held posture (yoga, Bharatanatyam) is shown when the person keeps still.
 Press q to quit. The log is written to logs/session.csv (one row per second).
 """
 import argparse
@@ -14,14 +15,17 @@ import cv2
 import numpy as np
 import torch
 
-from common import (HARModel, select_features, SEQ_LEN, mp_pose, mp_draw, landmarks_array,
-                    normalize, joint_angle, FallDetector, L_HIP, L_KNEE, L_ANKLE)
+from common import (HARModel, PoseMLP, select_features, pose_vector, motion_energy, SEQ_LEN, mp_pose,
+                    mp_draw, landmarks_array, normalize, joint_angle, FallDetector, L_HIP, L_KNEE, L_ANKLE)
 
 p = argparse.ArgumentParser()
 p.add_argument("--source", default="0")
 p.add_argument("--model", default="har_model.pt")
 p.add_argument("--log", default="logs/session.csv")
 p.add_argument("--threshold", type=float, default=0.6, help="min probability to accept a prediction")
+p.add_argument("--pose-model", default="pose_model.pt", help="posture classifier (skipped if the file is missing)")
+p.add_argument("--pose-threshold", type=float, default=0.7, help="min probability to show a posture")
+p.add_argument("--still", type=float, default=0.03, help="max movement (torso lengths/frame) to count as holding still")
 args = p.parse_args()
 
 ckpt = torch.load(args.model, map_location="cpu")
@@ -33,6 +37,19 @@ model = HARModel(len(mean), len(actions))
 model.load_state_dict(ckpt["state_dict"])
 model.eval()
 
+pose_model = None
+if os.path.exists(args.pose_model):
+    pck = torch.load(args.pose_model, map_location="cpu")
+    pose_classes = pck["classes"]
+    pose_mean = np.array(pck["mean"], dtype=np.float32)
+    pose_std = np.array(pck["std"], dtype=np.float32)
+    pose_model = PoseMLP(pck["n_features"], len(pose_classes))
+    pose_model.load_state_dict(pck["state_dict"])
+    pose_model.eval()
+    print(f"Posture model loaded: {len(pose_classes)} classes")
+pose_recent = deque(maxlen=10)       # recent posture predictions for smoothing
+posture, pose_conf = "", 0.0
+
 cap = cv2.VideoCapture(int(args.source) if args.source.isdigit() else args.source)
 if not cap.isOpened():
     raise SystemExit(f"Cannot open source: {args.source}")
@@ -40,7 +57,7 @@ if not cap.isOpened():
 os.makedirs(os.path.dirname(args.log) or ".", exist_ok=True)
 log_f = open(args.log, "w", newline="")
 writer = csv.writer(log_f)
-writer.writerow(["timestamp", "activity", "confidence", "squat_reps", "fall_alert"])
+writer.writerow(["timestamp", "activity", "confidence", "squat_reps", "fall_alert", "pose"])
 
 window = deque(maxlen=SEQ_LEN)      # pose features for the classifier
 recent = deque(maxlen=8)            # recent predictions for smoothing
@@ -72,6 +89,20 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                 if activity == "squatting":
                     reps += 1
 
+            # --- held posture: one-frame classifier, shown only while the person keeps still ---
+            if pose_model is not None:
+                fv = (pose_vector(window[-1]) - pose_mean) / pose_std
+                with torch.no_grad():
+                    pp = torch.softmax(pose_model(torch.from_numpy(fv[None]).float()), 1)[0].numpy()
+                pose_recent.append(int(pp.argmax()) if pp.max() >= args.pose_threshold else -1)
+                still = len(window) >= 15 and motion_energy(list(window)[-15:]) < args.still
+                best = Counter(pose_recent).most_common(1)[0][0]
+                name = pose_classes[best] if best >= 0 else "none"
+                if still and name != "none" and Counter(pose_recent)[best] >= 6:
+                    posture, pose_conf = name, float(pp[best])
+                else:
+                    posture, pose_conf = "", 0.0
+
             # --- fall heuristic: fast hip drop + torso close to horizontal ---
             if fall_det.update(lm, w, h):
                 fall, fall_time = True, time.time()
@@ -92,13 +123,16 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
 
         now = time.time()
         if now - last_log >= 1.0:
-            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), activity, f"{conf:.2f}", reps, int(fall)])
+            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), activity, f"{conf:.2f}", reps, int(fall), posture])
             log_f.flush()
             last_log = now
 
-        cv2.rectangle(frame, (0, 0), (w, 70), (30, 30, 30), -1)
+        cv2.rectangle(frame, (0, 0), (w, 100 if pose_model is not None else 70), (30, 30, 30), -1)
         cv2.putText(frame, f"{activity} ({conf:.2f})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
         cv2.putText(frame, f"Squat reps: {reps}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        if posture:
+            cv2.putText(frame, f"Pose: {posture} ({pose_conf:.2f})", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                        (255, 180, 60), 2)
         if fall:
             cv2.putText(frame, "FALL DETECTED", (w - 300, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
         cv2.imshow("ActiSense", frame)

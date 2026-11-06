@@ -84,6 +84,10 @@ not a held-out estimate.
 | `evaluate_falls.py` | Measures the fall detector on UR Fall for several thresholds |
 | `run_app.py` | Live recognition, squat counter, fall alert, CSV session log |
 | `dashboard.py` | Streamlit dashboard for a recorded session |
+| `extract_penn.py` | Penn Action sports/exercise videos → pose windows (official train/test split kept) |
+| `extract_images.py` | Folders of posture images (yoga, Bharatanatyam) → skeleton features |
+| `train_pose.py` | Trains the one-frame posture classifier (`pose_model.pt`) with a `none` class |
+| `actisense_kaggle.ipynb` | Kaggle notebook: extraction + training of both models on Kaggle |
 | `uci_har_baseline.py` | Optional smartphone-sensor baseline on the UCI HAR dataset |
 | `GUIDE.md` | Detailed step-by-step procedure with troubleshooting |
 
@@ -119,6 +123,17 @@ python run_app.py            # press q to quit
 streamlit run dashboard.py
 ```
 
+## Kaggle workflow (heavy work on Kaggle, live demo on the laptop)
+
+1. Push the code to GitHub; upload your own `data/` windows as a **private** Kaggle dataset.
+2. Kaggle notebook (`actisense_kaggle.ipynb`): Internet on, Accelerator None; inputs `actisense-data`,
+   `penn-action-dataset`, `yoga-poses-dataset`, `bharatnatyam-dance-poses`; **Save & Run All**.
+3. Download `har_model.pt` and `pose_model.pt` from the Output tab into the project folder and run
+   `python run_app.py`: activities are shown as before, and a held posture appears as "Pose: …".
+
+The notebook builds a Python 3.11 environment with MediaPipe 0.10.14, the same version as the laptop,
+so the keypoints match.
+
 ## Datasets
 
 The datasets are **not redistributed** here; `download_datasets.py` fetches them from their official pages.
@@ -126,6 +141,8 @@ Both are for non-commercial research use and must be cited.
 
 - **KTH Actions** – C. Schuldt, I. Laptev, B. Caputo, "Recognizing human actions: a local SVM approach",
   ICPR 2004. https://www.csc.kth.se/cvap/actions/
+- **Penn Action** – W. Zhang, M. Zhu, K. Derpanis, "From Actemes to Action", ICCV 2013 (sports and exercise videos).
+- **Yoga Poses Dataset** (Kaggle, niharika41298) – 5 yoga poses; **Bharatnatyam Dance Poses** (Kaggle, pranavmanoj) – 9 postures.
 - **UR Fall Detection** – B. Kwolek, M. Kępski, "Human fall detection on embedded platform using depth maps and
   wireless accelerometer", Computer Methods and Programs in Biomedicine 117(3), 489–501, 2014.
   https://fenix.ur.edu.pl/~mkepski/ds/uf.html (CC BY-NC-SA 4.0)

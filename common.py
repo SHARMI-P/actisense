@@ -120,6 +120,62 @@ class FallDetector:
         return bool(full and hip_y - min(self.hip_hist) > self.drop and tilt > self.tilt)
 
 
+# ---------------- static postures (yoga, Bharatanatyam) ----------------
+# MediaPipe left/right landmark pairs, used to mirror a pose (a left-leg tree pose = a right-leg one)
+LR_PAIRS = [(1, 4), (2, 5), (3, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16), (17, 18),
+            (19, 20), (21, 22), (23, 24), (25, 26), (27, 28), (29, 30), (31, 32)]
+# joint angles that describe a posture: (a, joint, c)
+POSE_ANGLES = [(11, 13, 15), (12, 14, 16),     # elbows
+               (13, 11, 23), (14, 12, 24),     # shoulders
+               (11, 23, 25), (12, 24, 26),     # hips
+               (23, 25, 27), (24, 26, 28)]     # knees
+N_POSE_FEATURES = 99 + len(POSE_ANGLES)
+
+
+def mirror_xyz(xyz):
+    """Mirror normalised (..., 33, 3) coordinates left <-> right."""
+    out = xyz.copy()
+    for a, b in LR_PAIRS:
+        out[..., a, :], out[..., b, :] = xyz[..., b, :], xyz[..., a, :]
+    out[..., 0] = -out[..., 0]
+    return out
+
+
+def pose_vector(norm):
+    """One frame -> posture features: 99 normalised coordinates + 8 joint angles (0..1).
+    `norm` = the 132 values from normalize(), or already (33, 3) coordinates."""
+    xyz = np.asarray(norm, dtype=np.float32)
+    xyz = xyz.reshape(33, 3) if xyz.shape == (33, 3) else xyz[..., :99].reshape(33, 3)
+    ang = []
+    for a, b, c in POSE_ANGLES:
+        ba, bc = xyz[a] - xyz[b], xyz[c] - xyz[b]
+        cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
+        ang.append(np.arccos(np.clip(cos, -1.0, 1.0)) / np.pi)
+    return np.concatenate([xyz.flatten(), np.array(ang, dtype=np.float32)]).astype(np.float32)
+
+
+def motion_energy(frames):
+    """Mean frame-to-frame movement of the normalised keypoints (torso lengths per frame).
+    Small = the person is holding still (a posture); large = moving (an activity)."""
+    f = np.asarray(frames, dtype=np.float32)[..., :99]
+    if len(f) < 2:
+        return 0.0
+    return float(np.abs(np.diff(f, axis=0)).mean())
+
+
+class PoseMLP(nn.Module):
+    """Small classifier for held postures from ONE frame of posture features."""
+
+    def __init__(self, n_features, n_classes):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(n_features, 256), nn.ReLU(), nn.Dropout(0.3),
+                                 nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.3),
+                                 nn.Linear(128, n_classes))
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class HARModel(nn.Module):
     """2-layer LSTM over a window of pose frames, followed by a small classifier head."""
 

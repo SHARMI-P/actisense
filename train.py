@@ -30,7 +30,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from common import HARModel, select_features
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--data", default="data")
+ap.add_argument("--data", nargs="+", default=["data"], help="one or more folders of <activity>/*.npy windows")
+ap.add_argument("--dataset-pattern", default=r"^(person\d+_|penn(Train|Test)_)",
+                help="file names from public datasets (KTH, Penn Action); everything else = own recordings")
 ap.add_argument("--epochs", type=int, default=60)
 ap.add_argument("--patience", type=int, default=10, help="stop after this many epochs without improvement")
 ap.add_argument("--weighting", choices=["inverse", "sqrt", "none"], default="sqrt",
@@ -48,16 +50,17 @@ args = ap.parse_args()
 BATCH, LR = 64, 1e-3
 torch.manual_seed(42)
 np.random.seed(42)
-SUBJECT_FILE = re.compile(r"^person\d+_")        # files that come from KTH (have a person id)
+SUBJECT_FILE = re.compile(args.dataset_pattern)  # files from public datasets (KTH person id, Penn Action)
 
 # ---------------- load ----------------
-actions = sorted(d for d in os.listdir(args.data) if glob.glob(os.path.join(args.data, d, "*.npy")))
+actions = sorted({d for root in args.data for d in os.listdir(root)
+                  if glob.glob(os.path.join(root, d, "*.npy"))})
 if len(actions) < 2:
-    raise SystemExit(f"Need recorded data for at least 2 actions in {args.data}/")
+    raise SystemExit(f"Need recorded data for at least 2 actions in {args.data}")
 
 X, y, names, groups = [], [], [], []
 for i, a in enumerate(actions):
-    for f in sorted(glob.glob(os.path.join(args.data, a, "*.npy"))):
+    for f in sorted(f for root in args.data for f in glob.glob(os.path.join(root, a, "*.npy"))):
         X.append(np.load(f))
         y.append(i)
         base = os.path.basename(f)

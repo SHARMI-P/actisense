@@ -30,6 +30,13 @@ per = df["activity"].value_counts().rename_axis("activity").reset_index(name="se
 st.altair_chart(alt.Chart(per).mark_bar().encode(
     x="seconds:Q", y=alt.Y("activity:N", sort="-x"), color="activity:N"), use_container_width=True)
 
+if "pose" in df.columns and df["pose"].fillna("").astype(str).str.len().gt(0).any():
+    st.subheader("Time held per posture")
+    held = df[df["pose"].fillna("").astype(str).str.len() > 0]
+    per_pose = held["pose"].value_counts().rename_axis("pose").reset_index(name="seconds")
+    st.altair_chart(alt.Chart(per_pose).mark_bar().encode(
+        x="seconds:Q", y=alt.Y("pose:N", sort="-x"), color="pose:N"), use_container_width=True)
+
 st.subheader("Activity timeline")
 st.altair_chart(alt.Chart(df).mark_tick(thickness=4, size=25).encode(
     x="timestamp:T", y="activity:N", color="activity:N",
