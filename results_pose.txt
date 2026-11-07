@@ -1,0 +1,41 @@
+Best epoch (validation): 50
+Test samples: 2442
+Test accuracy:          0.952
+Test balanced accuracy: 0.920
+Test macro-F1:          0.891
+Accuracy on activities: 0.959  (1694 samples)
+Accuracy on bharatanatyam: 0.890  (283 samples)
+Accuracy on yoga: 0.963  (465 samples)
+Note: samples with split 'any' were split at random; augmented copies of one photo can fall on both sides, so those scores can be optimistic.
+
+               precision    recall  f1-score   support
+
+ardhamandalam       0.92      0.73      0.81        15
+       bramha       0.72      0.90      0.80        20
+      downdog       0.97      0.99      0.98        94
+       garuda       0.88      1.00      0.94        15
+      goddess       0.84      0.95      0.89        80
+   muzhumandi       0.95      0.89      0.92        47
+  nagabandham       0.80      0.91      0.85        44
+      nataraj       0.89      0.94      0.91        63
+         none       0.99      0.96      0.98      1694
+        plank       0.82      0.94      0.88       115
+    prenkhana       1.00      0.95      0.97        20
+    samapadam       0.81      0.74      0.77        39
+     swastika       0.70      0.95      0.81        20
+         tree       0.81      0.97      0.88        69
+     warrior2       0.95      0.97      0.96       107
+
+     accuracy                           0.95      2442
+    macro avg       0.87      0.92      0.89      2442
+ weighted avg       0.96      0.95      0.95      2442
+
+Most common confusions (true -> predicted):
+  none             -> plank            19
+  none             -> tree             15
+  none             -> goddess          12
+  none             -> nataraj          7
+  samapadam        -> bramha           5
+  none             -> warrior2         4
+  none             -> swastika         4
+  plank            -> none             3

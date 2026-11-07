@@ -1,0 +1,44 @@
+Settings: weighting=sqrt, features=xyz, augment=True, test-pattern=person(02|03|05|06|07|08|09|10|22)_|pennTest_
+Best epoch (chosen on validation): 27
+Test windows: 8890
+Test accuracy:          0.885
+Test balanced accuracy: 0.859
+Test macro-F1:          0.813
+Accuracy on dataset (unseen people): 0.886  (8770 windows)
+Accuracy on own recordings: 0.817  (120 windows)
+
+                 precision    recall  f1-score   support
+
+ baseball_swing       0.63      0.91      0.75       116
+        bowling       0.74      0.87      0.80       237
+         boxing       0.96      0.98      0.97      1487
+       clapping       0.83      0.98      0.90      1410
+     golf_swing       0.95      0.88      0.92       222
+      jump_rope       0.82      0.75      0.79        85
+  jumping_jacks       0.97      0.88      0.92        33
+          lying       0.79      1.00      0.88        33
+         pullup       0.91      0.83      0.87       375
+         pushup       0.97      0.91      0.94       256
+        running       0.86      0.82      0.84       363
+        sitting       0.42      0.97      0.58        29
+          situp       0.91      0.73      0.81       311
+      squatting       0.90      0.84      0.87       831
+       standing       0.19      0.77      0.30        30
+tennis_forehand       0.71      0.65      0.68       153
+   tennis_serve       0.81      0.84      0.82       246
+        walking       0.93      0.90      0.92       916
+         waving       0.98      0.82      0.89      1757
+
+       accuracy                           0.89      8890
+      macro avg       0.80      0.86      0.81      8890
+   weighted avg       0.90      0.89      0.89      8890
+
+Most common confusions (true -> predicted):
+  waving     -> clapping     273  (15.5% of waving)
+  running    -> walking       41  (11.3% of running)
+  waving     -> standing      39  (2.2% of waving)
+  walking    -> running       36  (3.9% of walking)
+  situp      -> squatting     34  (10.9% of situp)
+  squatting  -> baseball_swing    23  (2.8% of squatting)
+  pullup     -> standing      23  (6.1% of pullup)
+  squatting  -> bowling       22  (2.6% of squatting)
