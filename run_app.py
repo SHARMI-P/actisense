@@ -24,8 +24,10 @@ p.add_argument("--model", default="har_model.pt")
 p.add_argument("--log", default="logs/session.csv")
 p.add_argument("--threshold", type=float, default=0.6, help="min probability to accept a prediction")
 p.add_argument("--pose-model", default="pose_model.pt", help="posture classifier (skipped if the file is missing)")
-p.add_argument("--pose-threshold", type=float, default=0.7, help="min probability to show a posture")
+p.add_argument("--pose-threshold", type=float, default=0.6, help="min probability to show a posture")
 p.add_argument("--still", type=float, default=0.03, help="max movement (torso lengths/frame) to count as holding still")
+p.add_argument("--smooth", type=int, default=15, help="how many recent predictions vote on the label")
+p.add_argument("--debug", action="store_true", help="show movement level and top-3 guesses of both models")
 args = p.parse_args()
 
 ckpt = torch.load(args.model, map_location="cpu")
@@ -60,7 +62,9 @@ writer = csv.writer(log_f)
 writer.writerow(["timestamp", "activity", "confidence", "squat_reps", "fall_alert", "pose"])
 
 window = deque(maxlen=SEQ_LEN)      # pose features for the classifier
-recent = deque(maxlen=8)            # recent predictions for smoothing
+recent = deque(maxlen=args.smooth)  # recent predictions for smoothing
+STATIC = [a for a in ("standing", "sitting", "lying") if a in actions]   # the only activities allowed while still
+motion, still, act_top, pose_top = 0.0, False, [], []
 fall_det = FallDetector(drop=0.15, tilt=45)           # same rule that evaluate_falls.py measures on UR Fall
 activity, conf = "unknown", 0.0
 reps, stage = 0, None
@@ -89,16 +93,21 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                 if activity == "squatting":
                     reps += 1
 
-            # --- held posture: one-frame classifier, shown only while the person keeps still ---
+            # --- movement level over the last 0.5 s: still = holding a posture, else moving ---
+            if len(window) >= 15:
+                motion = motion_energy(list(window)[-15:])
+                still = motion < args.still
+
+            # --- held posture: one-frame classifier, used only while the person keeps still ---
             if pose_model is not None:
                 fv = (pose_vector(window[-1]) - pose_mean) / pose_std
                 with torch.no_grad():
                     pp = torch.softmax(pose_model(torch.from_numpy(fv[None]).float()), 1)[0].numpy()
+                pose_top = [(pose_classes[i], float(pp[i])) for i in np.argsort(pp)[::-1][:3]]
                 pose_recent.append(int(pp.argmax()) if pp.max() >= args.pose_threshold else -1)
-                still = len(window) >= 15 and motion_energy(list(window)[-15:]) < args.still
-                best = Counter(pose_recent).most_common(1)[0][0]
+                best, votes = Counter(pose_recent).most_common(1)[0]
                 name = pose_classes[best] if best >= 0 else "none"
-                if still and name != "none" and Counter(pose_recent)[best] >= 6:
+                if still and name != "none" and votes >= pose_recent.maxlen // 2:
                     posture, pose_conf = name, float(pp[best])
                 else:
                     posture, pose_conf = "", 0.0
@@ -110,16 +119,24 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         if fall and time.time() - fall_time > 5:
             fall = False
 
-        # --- activity classification on the last SEQ_LEN frames ---
+        # --- activity classification on the last SEQ_LEN frames (motion-aware) ---
         if len(window) == SEQ_LEN:
             x = (select_features(np.stack(window), features) - mean) / std
             with torch.no_grad():
                 prob = torch.softmax(model(torch.from_numpy(x[None]).float()), 1)[0].numpy()
-            if prob.max() >= args.threshold:
+            act_top = [(actions[i], float(prob[i])) for i in np.argsort(prob)[::-1][:3]]
+            if still and STATIC:
+                # holding still: a movement class (tennis serve, bowling, waving ...) is impossible
+                cand = max(STATIC, key=lambda a: prob[actions.index(a)])
+                i = actions.index(cand)
+                recent.append(i)
+            elif prob.max() >= args.threshold:
                 recent.append(int(prob.argmax()))
             if recent:
-                idx = Counter(recent).most_common(1)[0][0]
-                activity, conf = actions[idx], float(prob[idx])
+                idx, votes = Counter(recent).most_common(1)[0]
+                # change the label only when the new one wins at least half of the recent votes
+                if actions[idx] == activity or votes >= len(recent) // 2 + 1:
+                    activity, conf = actions[idx], float(prob[idx])
 
         now = time.time()
         if now - last_log >= 1.0:
@@ -127,12 +144,20 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
             log_f.flush()
             last_log = now
 
-        cv2.rectangle(frame, (0, 0), (w, 100 if pose_model is not None else 70), (30, 30, 30), -1)
-        cv2.putText(frame, f"{activity} ({conf:.2f})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-        cv2.putText(frame, f"Squat reps: {reps}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        if posture:
-            cv2.putText(frame, f"Pose: {posture} ({pose_conf:.2f})", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+        cv2.rectangle(frame, (0, 0), (w, 70), (30, 30, 30), -1)
+        if posture:     # a held posture is the main label; the activity model is set aside while still
+            cv2.putText(frame, f"Pose: {posture} ({pose_conf:.2f})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                         (255, 180, 60), 2)
+        else:
+            cv2.putText(frame, f"{activity} ({conf:.2f})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        cv2.putText(frame, f"Squat reps: {reps}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        if args.debug:
+            lines = [f"movement {motion:.3f} ({'STILL' if still else 'moving'}, still below {args.still})",
+                     "activity: " + ", ".join(f"{n} {v:.2f}" for n, v in act_top),
+                     "posture:  " + ", ".join(f"{n} {v:.2f}" for n, v in pose_top)]
+            cv2.rectangle(frame, (0, h - 80), (w, h), (30, 30, 30), -1)
+            for k, line in enumerate(lines):
+                cv2.putText(frame, line, (10, h - 58 + 24 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         if fall:
             cv2.putText(frame, "FALL DETECTED", (w - 300, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
         cv2.imshow("ActiSense", frame)
