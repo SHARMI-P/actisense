@@ -27,6 +27,7 @@ p.add_argument("--pose-model", default="pose_model.pt", help="posture classifier
 p.add_argument("--pose-threshold", type=float, default=0.6, help="min probability to show a posture")
 p.add_argument("--still", type=float, default=0.03, help="max movement (torso lengths/frame) to count as holding still")
 p.add_argument("--smooth", type=int, default=15, help="how many recent predictions vote on the label")
+p.add_argument("--legs", type=float, default=0.5, help="min visibility of knees+ankles to trust leg-based labels")
 p.add_argument("--debug", action="store_true", help="show movement level and top-3 guesses of both models")
 args = p.parse_args()
 
@@ -65,6 +66,8 @@ window = deque(maxlen=SEQ_LEN)      # pose features for the classifier
 recent = deque(maxlen=args.smooth)  # recent predictions for smoothing
 STATIC = [a for a in ("standing", "sitting", "lying") if a in actions]   # the only activities allowed while still
 motion, still, act_top, pose_top = 0.0, False, [], []
+legs_visible = True                 # knees + ankles in view? sitting/standing/postures depend on them
+LEG_POINTS = [25, 26, 27, 28]        # MediaPipe: left/right knee, left/right ankle
 fall_det = FallDetector(drop=0.15, tilt=45)           # same rule that evaluate_falls.py measures on UR Fall
 activity, conf = "unknown", 0.0
 reps, stage = 0, None
@@ -82,6 +85,9 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         if lm is not None:
             mp_draw.draw_landmarks(frame, res.pose_landmarks, mp_pose.POSE_CONNECTIONS)
             window.append(normalize(lm))
+            legs = lm[LEG_POINTS]
+            in_frame = (legs[:, 0] >= 0) & (legs[:, 0] <= 1) & (legs[:, 1] >= 0) & (legs[:, 1] <= 1)
+            legs_visible = int((in_frame & (legs[:, 3] >= args.legs)).sum()) >= 3   # 3 of 4 knee/ankle points
             px = lm[:, :2] * np.array([w, h], dtype=np.float32)   # pixel coords for angles
 
             # --- squat repetition counter (knee angle state machine) ---
@@ -107,7 +113,7 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                 pose_recent.append(int(pp.argmax()) if pp.max() >= args.pose_threshold else -1)
                 best, votes = Counter(pose_recent).most_common(1)[0]
                 name = pose_classes[best] if best >= 0 else "none"
-                if still and name != "none" and votes >= pose_recent.maxlen // 2:
+                if still and legs_visible and name != "none" and votes >= pose_recent.maxlen // 2:
                     posture, pose_conf = name, float(pp[best])
                 else:
                     posture, pose_conf = "", 0.0
@@ -151,8 +157,13 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         else:
             cv2.putText(frame, f"{activity} ({conf:.2f})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
         cv2.putText(frame, f"Squat reps: {reps}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        if lm is not None and not legs_visible:
+            msg = "Step back: show knees and feet"
+            cv2.rectangle(frame, (0, 72), (w, 108), (0, 140, 255), -1)
+            cv2.putText(frame, msg, (10, 98), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         if args.debug:
-            lines = [f"movement {motion:.3f} ({'STILL' if still else 'moving'}, still below {args.still})",
+            lines = [f"movement {motion:.3f} ({'STILL' if still else 'moving'}, still below {args.still})  "
+                     f"legs {'visible' if legs_visible else 'NOT visible'}",
                      "activity: " + ", ".join(f"{n} {v:.2f}" for n, v in act_top),
                      "posture:  " + ", ".join(f"{n} {v:.2f}" for n, v in pose_top)]
             cv2.rectangle(frame, (0, h - 80), (w, h), (30, 30, 30), -1)
