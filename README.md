@@ -105,6 +105,27 @@ frame as plank); the live motion check removes most of these because postures ar
 The thresholds were selected and scored on the same 70 clips, so this is the best operating point on UR Fall,
 not a held-out estimate.
 
+## v5: optimisation (better and more honest predictions)
+
+v4 showed where accuracy is lost: standing and sitting were over-predicted (precision 0.19 and 0.42), waving was
+read as clapping, running as walking and sit-ups as squats. v5 targets these without adding activities:
+
+| Change | Why |
+|---|---|
+| Own webcam recordings removed | One person, one room: a source of bias |
+| Standing, sitting, lying moved to the posture model, learned from many people | Human Action Recognition dataset (sitting, using a laptop, sleeping) + KTH frames of 25 people standing |
+| Joint velocity features (`--velocity`) | Direction and speed of movement separate waving/clapping, running/walking and stillness |
+| Mirror and speed augmentation (`--mirror --speed`) | Left- and right-handed people; faster and slower people |
+| Three models compared (`--model lstm / bilstm / tcn`) | BiLSTM with attention and a temporal CNN against the v4 LSTM |
+| 3 seeds, mean ± spread; per-video voting reported too | Shows that a gain is real, not luck |
+| Final setting chosen on the validation set | The test set is used once, for the final numbers |
+| Posture model: torso/thigh tilt and ankle angles (`--extended`) | Directly separate standing, sitting and lying |
+
+Every setting is one row of `ablation.csv`. Run `actisense_kaggle_v5.ipynb` on Kaggle (add the
+[Human Action Recognition dataset](https://www.kaggle.com/datasets/meetnagadia/human-action-recognition-har-dataset)
+as an input) and copy `har_model.pt` and `pose_model.pt` from its outputs into the project folder; `run_app.py`
+detects the model version by itself.
+
 ## Project structure
 
 | File | Purpose |
@@ -120,7 +141,8 @@ not a held-out estimate.
 | `evaluate_falls.py` | Measures the fall detector on UR Fall for several thresholds |
 | `run_app.py` | Live recognition: activities, postures, squat counter, fall alert, step-back warning, CSV log |
 | `dashboard.py` | Streamlit dashboard for a recorded session (activities and postures) |
-| `actisense_kaggle.ipynb` | Kaggle notebook: extraction and training of both models |
+| `actisense_kaggle.ipynb` | Kaggle notebook (v4): extraction and training of both models |
+| `actisense_kaggle_v5.ipynb` | Kaggle notebook (v5): optimisation study and final v5 models |
 | `uci_har_baseline.py` | Optional smartphone-sensor baseline on the UCI HAR dataset |
 | `GUIDE.md` | Detailed step-by-step procedure with troubleshooting |
 
@@ -200,6 +222,8 @@ Own webcam recordings are kept private.
   (Kaggle copy used: https://www.kaggle.com/datasets/kaushalbora18/penn-action-dataset)
 - **Yoga Poses Dataset** – https://www.kaggle.com/datasets/niharika41298/yoga-poses-dataset
 - **Bharatnatyam Dance Poses** – https://www.kaggle.com/datasets/pranavmanoj/bharatnatyam-dance-poses
+- **Human Action Recognition (HAR) Dataset** – Kaggle (meetnagadia), from the DPhi data sprint; images of 15 actions
+  by many people, of which sitting, using a laptop and sleeping are used. https://www.kaggle.com/datasets/meetnagadia/human-action-recognition-har-dataset
 - **UR Fall Detection** – B. Kwolek, M. Kępski, "Human fall detection on embedded platform using depth maps and
   wireless accelerometer", Computer Methods and Programs in Biomedicine 117(3), 489–501, 2014.
   https://fenix.ur.edu.pl/~mkepski/ds/uf.html (CC BY-NC-SA 4.0)

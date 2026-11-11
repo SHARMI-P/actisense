@@ -1,11 +1,14 @@
 """Shared constants, pose-feature extraction and the LSTM model for ActiSense."""
 import numpy as np
-import mediapipe as mp
 import torch
 import torch.nn as nn
 
-mp_pose = mp.solutions.pose
-mp_draw = mp.solutions.drawing_utils
+try:                                   # MediaPipe is only needed for extraction and the live app
+    import mediapipe as mp
+    mp_pose = mp.solutions.pose
+    mp_draw = mp.solutions.drawing_utils
+except (ImportError, AttributeError):  # training on pre-extracted windows works without it
+    mp = mp_pose = mp_draw = None
 
 SEQ_LEN = 30            # frames per window (about 1 s at 30 fps)
 N_FEATURES = 33 * 4     # 33 landmarks x (x, y, z, visibility)
@@ -141,17 +144,38 @@ def mirror_xyz(xyz):
     return out
 
 
-def pose_vector(norm):
+# extra angles (v5): ankles, and how far torso and thighs lean from vertical - these separate
+# standing (all upright), sitting (thighs level) and lying (torso level) directly
+EXTRA_ANGLES = [(25, 27, 31), (26, 28, 32)]          # ankles (knee, ankle, foot)
+TILT_SEGMENTS = [((23, 24), (11, 12)),                # torso: mid-hip -> mid-shoulder
+                 ((23,), (25,)), ((24,), (26,))]      # thighs: hip -> knee
+N_POSE_FEATURES_V5 = N_POSE_FEATURES + len(EXTRA_ANGLES) + len(TILT_SEGMENTS)
+
+
+def _angle(a, b, c):
+    ba, bc = a - b, c - b
+    cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
+    return np.arccos(np.clip(cos, -1.0, 1.0)) / np.pi
+
+
+def pose_vector(norm, extended=False):
     """One frame -> posture features: 99 normalised coordinates + 8 joint angles (0..1).
+    extended=True (v5 models) adds 2 ankle angles + torso and thigh tilt from vertical (112 values).
     `norm` = the 132 values from normalize(), or already (33, 3) coordinates."""
     xyz = np.asarray(norm, dtype=np.float32)
     xyz = xyz.reshape(33, 3) if xyz.shape == (33, 3) else xyz[..., :99].reshape(33, 3)
-    ang = []
-    for a, b, c in POSE_ANGLES:
-        ba, bc = xyz[a] - xyz[b], xyz[c] - xyz[b]
-        cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-6)
-        ang.append(np.arccos(np.clip(cos, -1.0, 1.0)) / np.pi)
+    ang = [_angle(xyz[a], xyz[b], xyz[c]) for a, b, c in POSE_ANGLES]
+    if extended:
+        ang += [_angle(xyz[a], xyz[b], xyz[c]) for a, b, c in EXTRA_ANGLES]
+        for start, end in TILT_SEGMENTS:
+            v = xyz[list(end), :2].mean(0) - xyz[list(start), :2].mean(0)
+            ang.append(_angle(np.array([0.0, -1.0]), np.zeros(2), v))   # image y points down: up = (0, -1)
     return np.concatenate([xyz.flatten(), np.array(ang, dtype=np.float32)]).astype(np.float32)
+
+
+def pose_features_for(n_features):
+    """The pose_vector variant a saved posture model was trained with (107 = v4, 112 = v5)."""
+    return lambda norm: pose_vector(norm, extended=(n_features == N_POSE_FEATURES_V5))
 
 
 def motion_energy(frames):
@@ -188,3 +212,87 @@ class HARModel(nn.Module):
     def forward(self, x):
         out, _ = self.lstm(x)
         return self.head(out[:, -1])
+
+# ---------------- v5: motion features and stronger sequence models ----------------
+LR_PERM = list(range(33))
+for _a, _b in LR_PAIRS:
+    LR_PERM[_a], LR_PERM[_b] = _b, _a
+
+
+def add_velocity(x):
+    """(..., T, F) frames -> (..., T, F + 99): appends each joint's frame-to-frame movement (x, y, z).
+    Positions say WHERE the joints are; velocity says HOW they move (direction and speed), which separates
+    waving from clapping, running from walking and standing still from everything else.
+    Works on numpy arrays and torch tensors; the first frame gets zero velocity."""
+    xyz = x[..., :99]
+    if isinstance(x, torch.Tensor):
+        v = torch.diff(xyz, dim=-2, prepend=xyz[..., :1, :])
+        return torch.cat([x, v], -1)
+    v = np.diff(xyz, axis=-2, prepend=xyz[..., :1, :])
+    return np.concatenate([x, v], -1).astype(np.float32)
+
+
+def sequence_features(raw, features="all", velocity=False):
+    """Raw normalised windows (..., T, 132) -> model input, exactly as in training."""
+    x = select_features(raw, features)
+    return add_velocity(x) if velocity else x
+
+
+class BiLSTMAttn(nn.Module):
+    """Bidirectional 2-layer LSTM; attention pooling picks the most informative frames of the window."""
+
+    def __init__(self, n_features, n_classes, hidden=128):
+        super().__init__()
+        self.lstm = nn.LSTM(n_features, hidden, num_layers=2, batch_first=True, dropout=0.3,
+                            bidirectional=True)
+        self.att = nn.Linear(2 * hidden, 1)
+        self.head = nn.Sequential(nn.Linear(2 * hidden, 128), nn.ReLU(), nn.Dropout(0.3),
+                                  nn.Linear(128, n_classes))
+
+    def forward(self, x):
+        out, _ = self.lstm(x)                       # (B, T, 2H)
+        w = torch.softmax(self.att(out), dim=1)     # (B, T, 1) weight per frame
+        return self.head((w * out).sum(1))
+
+
+class TCN(nn.Module):
+    """Temporal convolution network: 1-D convolutions over time with growing dilation (1, 2, 4),
+    residual connections and batch norm; fast on a CPU and strong on skeleton sequences."""
+
+    def __init__(self, n_features, n_classes, hidden=128, kernel=5, dropout=0.3):
+        super().__init__()
+        self.inp = nn.Conv1d(n_features, hidden, 1)
+        self.blocks = nn.ModuleList()
+        for d in (1, 2, 4):
+            self.blocks.append(nn.Sequential(
+                nn.Conv1d(hidden, hidden, kernel, padding=d * (kernel - 1) // 2, dilation=d),
+                nn.BatchNorm1d(hidden), nn.ReLU(), nn.Dropout(dropout),
+                nn.Conv1d(hidden, hidden, kernel, padding=d * (kernel - 1) // 2, dilation=d),
+                nn.BatchNorm1d(hidden), nn.ReLU(), nn.Dropout(dropout)))
+        self.head = nn.Sequential(nn.Linear(2 * hidden, 128), nn.ReLU(), nn.Dropout(dropout),
+                                  nn.Linear(128, n_classes))
+
+    def forward(self, x):
+        h = self.inp(x.transpose(1, 2))             # (B, H, T)
+        for block in self.blocks:
+            h = h + block(h)
+        return self.head(torch.cat([h.mean(2), h.amax(2)], 1))
+
+
+MODELS = {"lstm": HARModel, "bilstm": BiLSTMAttn, "tcn": TCN}
+
+
+def make_model(kind, n_features, n_classes, hidden=128):
+    return MODELS[kind](n_features, n_classes, hidden=hidden)
+
+
+def load_activity_model(path):
+    """Load har_model.pt of any version -> (model, info dict with actions, mean, std, features, velocity)."""
+    ck = torch.load(path, map_location="cpu")
+    info = {"actions": ck["actions"], "mean": np.array(ck["mean"], dtype=np.float32),
+            "std": np.array(ck["std"], dtype=np.float32), "features": ck.get("features", "all"),
+            "velocity": ck.get("velocity", False), "model": ck.get("model", "lstm")}
+    model = make_model(info["model"], len(info["mean"]), len(info["actions"]), ck.get("hidden", 128))
+    model.load_state_dict(ck["state_dict"])
+    model.eval()
+    return model, info

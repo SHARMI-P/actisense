@@ -2,8 +2,11 @@
 
 python extract_images.py --root ".../yoga-poses-dataset/DATASET/TRAIN" --split train --source yoga --out poses_yoga_train.npz
 python extract_images.py --root ".../new_Dataset" --strip " Augmented" --source bharatanatyam --out poses_bharat.npz
+python extract_images.py --root ".../Human Action Recognition/train" --csv ".../Training_set.csv" \
+       --map using_laptop=sitting,sleeping=lying --only sitting,lying --source har --out poses_har.npz
 
-Layout: <root>/<pose name>/<image>.jpg|png|jpeg|bmp  (one folder per pose).
+Layout: <root>/<pose name>/<image>.jpg|png|jpeg|bmp  (one folder per pose),
+or --csv: a table with the columns filename,label and all images directly in <root>.
 Each image -> MediaPipe Pose in still-image mode -> 132 normalised values (same as the live app).
 --split: train | test | any (any = train_pose.py splits it).  Images without a detected person are skipped.
 """
@@ -24,6 +27,8 @@ def parse():
     p.add_argument("--split", default="any", choices=["train", "test", "any"])
     p.add_argument("--strip", default="", help="text removed from folder names, e.g. ' Augmented'")
     p.add_argument("--map", default="", help="rename poses: old=new,...")
+    p.add_argument("--csv", default="", help="labels table (filename,label) instead of one folder per pose")
+    p.add_argument("--only", default="", help="keep only these poses (after --map), comma list")
     p.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     return p.parse_args()
 
@@ -62,12 +67,23 @@ def main():
     args = parse()
     rename = dict(kv.split("=", 1) for kv in args.map.split(",") if "=" in kv)
     items = []
-    for cls in sorted(os.listdir(args.root)):
-        d = os.path.join(args.root, cls)
-        if not os.path.isdir(d):
-            continue
-        label = clean(cls, args.strip, rename)
-        items += [(os.path.join(d, f), label) for f in sorted(os.listdir(d)) if f.lower().endswith(IMAGE_EXT)]
+    if args.csv:
+        import csv
+        with open(args.csv, newline="") as f:
+            rows = list(csv.reader(f))
+        for row in rows[1:]:                      # header, then: image file name, label
+            if len(row) >= 2 and row[0].lower().endswith(IMAGE_EXT):
+                items.append((os.path.join(args.root, row[0]), clean(row[1], args.strip, rename)))
+    else:
+        for cls in sorted(os.listdir(args.root)):
+            d = os.path.join(args.root, cls)
+            if not os.path.isdir(d):
+                continue
+            label = clean(cls, args.strip, rename)
+            items += [(os.path.join(d, f), label) for f in sorted(os.listdir(d)) if f.lower().endswith(IMAGE_EXT)]
+    if args.only:
+        keep = {c.strip() for c in args.only.split(",")}
+        items = [(p, l) for p, l in items if l in keep]
     print(f"{len(items)} images in {len({l for _, l in items})} poses under {args.root}", flush=True)
 
     label_of = dict(items)

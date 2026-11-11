@@ -3,6 +3,8 @@
 python run_app.py                 (webcam)
 python run_app.py --source x.mp4  (video file)
 If pose_model.pt is present, a held posture (yoga, Bharatanatyam) is shown when the person keeps still.
+Works with v4 and v5 models: a v5 posture model also knows standing / sitting / lying (learned from many
+people in public datasets), so while the person keeps still those labels come from it.
 Press q to quit. The log is written to logs/session.csv (one row per second).
 """
 import argparse
@@ -15,8 +17,8 @@ import cv2
 import numpy as np
 import torch
 
-from common import (HARModel, PoseMLP, select_features, pose_vector, motion_energy, SEQ_LEN, mp_pose,
-                    mp_draw, landmarks_array, normalize, joint_angle, FallDetector, L_HIP, L_KNEE, L_ANKLE)
+from common import (PoseMLP, load_activity_model, sequence_features, pose_features_for, motion_energy, SEQ_LEN,
+                    mp_pose, mp_draw, landmarks_array, normalize, joint_angle, FallDetector, L_HIP, L_KNEE, L_ANKLE)
 
 p = argparse.ArgumentParser()
 p.add_argument("--source", default="0")
@@ -31,14 +33,9 @@ p.add_argument("--legs", type=float, default=0.5, help="min visibility of knees+
 p.add_argument("--debug", action="store_true", help="show movement level and top-3 guesses of both models")
 args = p.parse_args()
 
-ckpt = torch.load(args.model, map_location="cpu")
-actions = ckpt["actions"]
-mean = np.array(ckpt["mean"], dtype=np.float32)
-std = np.array(ckpt["std"], dtype=np.float32)
-features = ckpt.get("features", "all")      # older models were trained on all 132 values
-model = HARModel(len(mean), len(actions))
-model.load_state_dict(ckpt["state_dict"])
-model.eval()
+model, info = load_activity_model(args.model)      # any version: LSTM / BiLSTM / TCN, with or without velocity
+actions, mean, std = info["actions"], info["mean"], info["std"]
+print(f"Activity model: {info['model']}, {len(actions)} activities, velocity={info['velocity']}")
 
 pose_model = None
 if os.path.exists(args.pose_model):
@@ -49,6 +46,7 @@ if os.path.exists(args.pose_model):
     pose_model = PoseMLP(pck["n_features"], len(pose_classes))
     pose_model.load_state_dict(pck["state_dict"])
     pose_model.eval()
+    pose_vector = pose_features_for(pck["n_features"])
     print(f"Posture model loaded: {len(pose_classes)} classes")
 pose_recent = deque(maxlen=10)       # recent posture predictions for smoothing
 posture, pose_conf = "", 0.0
@@ -64,7 +62,10 @@ writer.writerow(["timestamp", "activity", "confidence", "squat_reps", "fall_aler
 
 window = deque(maxlen=SEQ_LEN)      # pose features for the classifier
 recent = deque(maxlen=args.smooth)  # recent predictions for smoothing
-STATIC = [a for a in ("standing", "sitting", "lying") if a in actions]   # the only activities allowed while still
+BASIC = ("standing", "sitting", "lying")
+POSE_BASIC = [c for c in BASIC if pose_model is not None and c in pose_classes]   # v5: from the posture model
+STATIC = [a for a in BASIC if a in actions]       # v4: from the activity model
+basic_label, basic_conf = "", 0.0                 # still-state label from the posture model (v5)
 motion, still, act_top, pose_top = 0.0, False, [], []
 legs_visible = True                 # knees + ankles in view? sitting/standing/postures depend on them
 LEG_POINTS = [25, 26, 27, 28]        # MediaPipe: left/right knee, left/right ankle
@@ -110,9 +111,14 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                 with torch.no_grad():
                     pp = torch.softmax(pose_model(torch.from_numpy(fv[None]).float()), 1)[0].numpy()
                 pose_top = [(pose_classes[i], float(pp[i])) for i in np.argsort(pp)[::-1][:3]]
-                pose_recent.append(int(pp.argmax()) if pp.max() >= args.pose_threshold else -1)
+                top = int(pp.argmax())
+                named = pose_classes[top] not in BASIC and pose_classes[top] != "none"
+                pose_recent.append(top if named and pp[top] >= args.pose_threshold else -1)
                 best, votes = Counter(pose_recent).most_common(1)[0]
                 name = pose_classes[best] if best >= 0 else "none"
+                if POSE_BASIC:            # best of standing / sitting / lying, used when the person is still
+                    b = max(POSE_BASIC, key=lambda c: pp[pose_classes.index(c)])
+                    basic_label, basic_conf = b, float(pp[pose_classes.index(b)])
                 if still and legs_visible and name != "none" and votes >= pose_recent.maxlen // 2:
                     posture, pose_conf = name, float(pp[best])
                 else:
@@ -127,22 +133,34 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
 
         # --- activity classification on the last SEQ_LEN frames (motion-aware) ---
         if len(window) == SEQ_LEN:
-            x = (select_features(np.stack(window), features) - mean) / std
+            x = (sequence_features(np.stack(window), info["features"], info["velocity"]) - mean) / std
             with torch.no_grad():
                 prob = torch.softmax(model(torch.from_numpy(x[None]).float()), 1)[0].numpy()
             act_top = [(actions[i], float(prob[i])) for i in np.argsort(prob)[::-1][:3]]
-            if still and STATIC:
-                # holding still: a movement class (tennis serve, bowling, waving ...) is impossible
+            cand_conf = {}
+            if still and POSE_BASIC and basic_label:
+                # holding still (v5): standing / sitting / lying from the posture model trained on many people
+                recent.append(basic_label)
+                cand_conf[basic_label] = basic_conf
+            elif still and STATIC:
+                # holding still (v4): a movement class (tennis serve, bowling, waving ...) is impossible
                 cand = max(STATIC, key=lambda a: prob[actions.index(a)])
-                i = actions.index(cand)
-                recent.append(i)
+                recent.append(cand)
+                cand_conf[cand] = float(prob[actions.index(cand)])
             elif prob.max() >= args.threshold:
-                recent.append(int(prob.argmax()))
+                recent.append(actions[int(prob.argmax())])
+                cand_conf[recent[-1]] = float(prob.max())
+            elif POSE_BASIC and basic_label in ("sitting", "lying") and basic_conf >= 0.8:
+                # small movements while clearly sitting or lying (talking, typing): keep that label
+                recent.append(basic_label)
+                cand_conf[basic_label] = basic_conf
             if recent:
-                idx, votes = Counter(recent).most_common(1)[0]
+                lab, votes = Counter(recent).most_common(1)[0]
                 # change the label only when the new one wins at least half of the recent votes
-                if actions[idx] == activity or votes >= len(recent) // 2 + 1:
-                    activity, conf = actions[idx], float(prob[idx])
+                if lab == activity or votes >= len(recent) // 2 + 1:
+                    if lab != activity or lab in cand_conf:
+                        conf = cand_conf.get(lab, conf)
+                    activity = lab
 
         now = time.time()
         if now - last_log >= 1.0:

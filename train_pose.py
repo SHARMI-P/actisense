@@ -2,10 +2,18 @@
 
 python train_pose.py --poses poses_yoga_train.npz poses_yoga_test.npz poses_bharat.npz \
                      --negatives data data_penn --test-pattern "person(02|03|05|06|07|08|09|10|22)_|pennTest_"
+v5 (static model: standing/sitting/lying from public data + postures):
+python train_pose.py --poses poses_yoga_train.npz poses_yoga_test.npz poses_bharat.npz poses_har.npz \
+                     --standing-from data --standing-classes boxing,clapping,waving \
+                     --negatives data_penn --negative-classes pushup,situp,pullup,jump_rope,jumping_jacks,squatting \
+                     --test-pattern "..." --extended --tag v5
 
 --poses      .npz files from extract_images.py (their split: train / test / any = random 20% test)
 --negatives  activity window folders; one frame per window becomes the class "none" (= no held posture),
              so the classifier can say "not a posture" instead of forcing one.
+--standing-from  activity window folders whose activities are done standing in place (KTH boxing, clapping,
+             waving: 25 people, 4 scenes); one frame per window becomes "standing".
+--extended   v5 features: + ankle angles and torso/thigh tilt (separate standing, sitting and lying).
 Saves pose_model.pt, results_pose.txt and confusion_matrix_pose.png.
 """
 import argparse
@@ -30,6 +38,11 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--poses", nargs="+", required=True)
 ap.add_argument("--negatives", nargs="*", default=[])
 ap.add_argument("--neg-per-class", type=int, default=250, help="windows taken per activity for 'none'")
+ap.add_argument("--negative-classes", default="", help="only these activities give 'none' frames (comma list)")
+ap.add_argument("--standing-from", nargs="*", default=[], help="window folders of activities done standing")
+ap.add_argument("--standing-classes", default="boxing,clapping,waving")
+ap.add_argument("--standing-per-class", type=int, default=400)
+ap.add_argument("--extended", action="store_true", help="v5 posture features (112 values)")
 ap.add_argument("--test-pattern", default="", help="negative files matching this regex go to test")
 ap.add_argument("--epochs", type=int, default=150)
 ap.add_argument("--patience", type=int, default=20)
@@ -49,22 +62,33 @@ for f in args.poses:
     source += [str(d["source"])] * n
     print(f"{f}: {n} samples, source={d['source']}, split={d['split']}")
 
-# ---------------- 'none' = one frame from activity windows ----------------
-for root in args.negatives:
-    for cls in sorted(os.listdir(root)):
-        files = sorted(glob.glob(os.path.join(root, cls, "*.npy")))
-        if not files:
-            continue
-        pick = rng.choice(len(files), size=min(args.neg_per_class, len(files)), replace=False)
-        for i in pick:
-            w = np.load(files[i])
-            xyz.append(w[len(w) // 2, :99].reshape(1, 33, 3))
-            labels.append("none")
-            name = os.path.basename(files[i])
-            is_test = bool(args.test_pattern and re.search(args.test_pattern, name))
-            split.append("test" if is_test else ("train" if re.match(r"^(person\d+_|penn)", name) else "any"))
-            source.append("activities")
-    print(f"negatives from {root}: total 'none' so far {labels.count('none')}")
+# ---------------- frames taken from activity windows: 'none' and 'standing' ----------------
+def frames_from_windows(roots, keep, per_class, label, src, random_frame=False):
+    for root in roots:
+        for cls in sorted(os.listdir(root)):
+            if keep and cls not in keep:
+                continue
+            files = sorted(glob.glob(os.path.join(root, cls, "*.npy")))
+            if not files:
+                continue
+            pick = rng.choice(len(files), size=min(per_class, len(files)), replace=False)
+            for i in pick:
+                w = np.load(files[i])
+                k = int(rng.integers(len(w))) if random_frame else len(w) // 2
+                xyz.append(w[k, :99].reshape(1, 33, 3))
+                labels.append(label)
+                name = os.path.basename(files[i])
+                is_test = bool(args.test_pattern and re.search(args.test_pattern, name))
+                split.append("test" if is_test else ("train" if re.match(r"^(person\d+_|penn)", name) else "any"))
+                source.append(src)
+        print(f"{label} frames from {root}: {labels.count(label)} so far")
+
+
+neg_keep = {c.strip() for c in args.negative_classes.split(",") if c.strip()}
+frames_from_windows(args.negatives, neg_keep, args.neg_per_class, "none", "activities")
+std_keep = {c.strip() for c in args.standing_classes.split(",") if c.strip()}
+frames_from_windows(args.standing_from, std_keep, args.standing_per_class, "standing", "kth-standing",
+                    random_frame=True)
 
 XYZ = np.concatenate(xyz).astype(np.float32)
 labels, split, source = np.array(labels), np.array(split), np.array(source)
@@ -87,7 +111,7 @@ print(f"Split: train {len(tr)} / validation {len(va)} / test {len(te)}")
 
 
 def features(batch_xyz):
-    return np.stack([pose_vector(p) for p in batch_xyz])
+    return np.stack([pose_vector(p, extended=args.extended) for p in batch_xyz])
 
 
 def augment(batch_xyz):
@@ -98,6 +122,10 @@ def augment(batch_xyz):
     c, s = np.cos(th)[:, None], np.sin(th)[:, None]
     x, z = out[..., 0].copy(), out[..., 2].copy()
     out[..., 0], out[..., 2] = c * x + s * z, -s * x + c * z
+    roll = rng.uniform(-np.radians(10), np.radians(10), len(out))      # camera tilted a little
+    c, s = np.cos(roll)[:, None], np.sin(roll)[:, None]
+    x, yy = out[..., 0].copy(), out[..., 1].copy()
+    out[..., 0], out[..., 1] = c * x - s * yy, s * x + c * yy
     out *= rng.uniform(0.9, 1.1, (len(out), 1, 1))
     out += rng.normal(0, 0.02, out.shape).astype(np.float32)
     return out
